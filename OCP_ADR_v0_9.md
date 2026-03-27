@@ -1,23 +1,14 @@
 # **📑 Project Spec: OpenCode Projects (OCP) Control Tower**
 
-**Version:** 0.9 (GSD Unification \+ Concurrency Correctness \+ Schema Completeness)
+**Version:** 0.10.0 (Release Candidate: Phase Verification & Conflict Protocols)
 
 **Core Logic:** Autoresearch-inspired Iterative Engineering via Remote or Local OpenCode Server, powered by GSD as the underlying context engineering and planning engine.
 
-**Changelog from v0.8 to v0.9:**
+**Changelog from v0.9 to v0.10.0:**
 
-* Unified .ocp/ and .planning/ into a single shared brain (Section 4 rewrite)  
-* Defined Action Plan schema explicitly (Section 5.4)  
-* Fixed FILE\_MAP.md staleness in concurrent execution via branch-scoped snapshots (Section 5.1)  
-* Placed @test agent explicitly in the Ratchet loop (Section 6\)  
-* Defined LLM Judge context budget (Section 5.6)  
-* Added SYSTEM\_STATE.md / STATE.md compression trigger (Section 5.7, new)  
-* Wired tokens\_used \+ token\_budget as live enforced fields (Section 4\)  
-* Defined GSD ↔ OCP layer boundary (Section 2\)  
-* Added strict API contract requirements for @plan to align @test and @build (Section 5.4)  
-* Clarified Orchestrator-only writes for yq tracking to prevent permission crashes (Section 6\)  
-* Required \--skip-permissions for headless Docker execution (Section 6\)  
-* Appended Appendix A: Architectural Rationale & Impact
+* Resolved @review agent open question via GSD Phase Verification (/gsd:review).  
+* Resolved merge conflict open question via strict human escalation protocol (respecting the context funnel limits of the @build agent).  
+* Crossed off previous targets from Section 7\.
 
 ## **1\. System Overview**
 
@@ -62,19 +53,6 @@ The application maintains a **Global Configuration Registry** on the user's loca
 * **Enter New Configuration:** The UI requires:  
   * **Always:** Environment Type (Local/Remote), Local Project Path.  
   * **Remote Only:** Remote Host Address, Port Number, SSH Key Path.
-
-**.ocp/config.json schema:**
-
-{  
-  "environment": "remote",  
-  "local\_project\_path": "/home/user/my-project",  
-  "remote\_host": "dev.example.com",  
-  "remote\_port": 4096,  
-  "ssh\_key\_path": "\~/.ssh/id\_ed25519",  
-  "judge\_context\_budget": 2000,  
-  "default\_token\_budget": 50000,  
-  "model\_profile": "balanced"  
-}
 
 ## **4\. Data Storage: Unified File-Based Brain**
 
@@ -123,32 +101,10 @@ depends\_on:
   \- TKT-101  
 retry\_count: 0  
 max\_retries: 3  
-token\_budget: 50000     \# enforced ceiling for this ticket's total agent spend  
-tokens\_used: 0          \# updated live after each agent call  
+token\_budget: 50000       
+tokens\_used: 0            
 branch: ocp/TKT-102  
 \---
-
-**Action Plan body (GSD XML task structure):**
-
-\<task type="auto"\>  
-  \<n\>Create Next.js API route for user login\</n\>  
-  \<objective\>Single sentence. What done looks like.\</objective\>  
-  \<context\_budget\>8000\</context\_budget\>  
-  \<files\>  
-    \<file action="CREATE"\>src/app/api/auth/login/route.ts\</file\>  
-    \<file action="MODIFY" lines="45-67"\>src/lib/auth.ts\</file\>  
-    \<file action="READ\_ONLY"\>tests/auth.test.ts\</file\>  
-  \</files\>  
-  \<snippets\>  
-    \<\!-- src/lib/auth.ts lines 45-67 snippet here \--\>  
-  \</snippets\>  
-  \<constraints\>  
-    Strict API Signature: function login(req: Request): Promise\<Response\>  
-    Use jose for JWT, not jsonwebtoken.  
-  \</constraints\>  
-  \<verify\>npm run test:auth\</verify\>  
-  \<done\>Valid credentials return cookie. Invalid credentials return 401.\</done\>  
-\</task\>
 
 ## **5\. System Integrity & Concurrency Protocols**
 
@@ -163,13 +119,7 @@ branch: ocp/TKT-102
 Strict OS-level privilege separation ensures the agent cannot delete or corrupt the planning brain:
 
 * **The Orchestrator:** The Tauri UI owns .planning/ and .ocp/ and manages all state and git commands.  
-* **The Worker (Docker):** The OpenCode agent runs inside a container with explicit mount permissions:
-
-\-v $(pwd)/src:/workspace/src:rw  
-\-v $(pwd)/.planning:/workspace/.planning:ro  
-\-v $(pwd)/.ocp:/workspace/.ocp:ro
-
-The agent has strictly **Read-Only** access to all state files. It can only write to src/.
+* **The Worker (Docker):** The OpenCode agent runs inside a container with explicit mount permissions. It has strictly **Read-Only** access to all state files. It can only write to src/.
 
 ### **5.3. Mandatory Ticket Locking & Heartbeats**
 
@@ -181,16 +131,15 @@ When a ticket is In Progress, the UI applies a Read-Only lock to the plan body.
 
 ### **5.4. Hierarchical Context Funnels (Token Efficiency)**
 
-Context is strictly separated by agent role.
+Context is strictly separated by agent role to prevent token explosions.
 
 | Agent | Reads | Does not read |
 | :---- | :---- | :---- |
 | @plan | FILE\_MAP.md snapshot, full files for relevant scope | Unrelated source files |
 | @test | Requirements section of ticket, \<verify\> command | Codebase, FILE\_MAP |
 | @build | Action Plan XML \+ inlined snippets only | Full files, FILE\_MAP.md, test files |
-| @judge | Error log (last 100 lines), failing test file, \<objective\> \+ \<verify\> | Everything else |
-
-**Strict API Contracts:** To prevent the API Contract Gap between @test and @build, the @plan agent must explicitly define exact function signatures, class names, and data payloads in the \<constraints\> block. Both sub-agents build against this unified contract.
+| @judge | Error log (100 lines), failing test file, \<objective\> \+ \<verify\> | Everything else |
+| @review | Cross-AI phase check of all completed tickets in a Feature | Codebase outside of the feature's scope |
 
 ### **5.5. Adversarial QA (Validation Integrity)**
 
@@ -201,12 +150,22 @@ Context is strictly separated by agent role.
 
 Validation runs in two gates to prevent expensive Ratchet resets on flaky tests.
 
-1. **Gate 1 (Lightning Check):** Fast linters and compilers (e.g. tsc \--noEmit, eslint) run first.  
-2. **Gate 2 (The LLM Judge):** If a heavy E2E test fails, a cheap/fast model reviews the failure (Classifies as CODE\_ERROR or FLAKE).
+1. **Gate 1 (Lightning Check):** Fast linters and compilers run first.  
+2. **Gate 2 (The LLM Judge):** If a heavy E2E test fails, a cheap/fast model classifies the failure as CODE\_ERROR or FLAKE.
 
 ### **5.7. STATE.md Compression**
 
 Triggered automatically when OCP calls /gsd:complete-milestone. A compression agent archives resolved decisions to .planning/archive/milestone-N-state.md, keeping the active STATE.md lean and token-efficient.
+
+### **5.8. Phase Verification (The @review Agent Protocol)**
+
+Because an OCP Feature maps directly to a GSD Phase, verification is handled holistically at the Feature level:
+
+1. When all Tickets (PLAN.md tasks) in a Feature complete their individual Ratchet loops, they move to the "In Review" status.  
+2. The UI triggers GSD's native phase verification (/gsd:review).  
+3. The @review agent performs a cross-AI peer review, ensuring "must-haves were delivered after execution".  
+4. **Pass:** Tickets move to "Done". Feature is closed.  
+5. **Fail:** GSD automatically diagnoses failures and creates verified fix plans. OCP renders these natively as new "To Do" tickets, restarting the execution cycle securely.
 
 ## **6\. The "Ratchet" Execution Loop**
 
@@ -221,63 +180,44 @@ Triggered automatically when OCP calls /gsd:complete-milestone. A compression ag
 
 3\.  PLAN  
     └── @plan reads FILE\_MAP branch snapshot  
-    └── @plan generates Action Plan (PLAN.md XML structure) with strict API signatures  
-    └── If Action Plan exceeds context\_budget → @plan compresses snippets
+    └── @plan generates Action Plan (PLAN.md XML structure) with strict API signatures
 
-4\.  TEST AUTHORING (before @build starts)  
-    └── @test reads ticket Requirements  
-    └── @test writes validation script  
-    └── @build is BLOCKED from this file (Docker mount \+ READ\_ONLY file action)
+4\.  TEST AUTHORING  
+    └── @test writes validation script (@build is BLOCKED from this file)
 
 5\.  BUILD  
     └── Tauri Orchestrator launches Docker Execution Engine.  
-    └── MUST include \`--skip-permissions\` (or equivalent yolo mode) to prevent headless hanging.  
+    └── MUST include \`--skip-permissions\` (yolo mode) to prevent headless hanging.  
     └── @build reads Action Plan \+ inlined snippets only and implements code.
 
-6\.  SYNC  
+6\.  SYNC & CONFLICT PROTOCOL  
     └── git pull \--rebase origin main  
-    └── Conflict markers detected → auto-fail → back to step 5
+    └── Conflict markers detected → \*\*HALT AND ESCALATE TO HUMAN.\*\*  
+        \*Rationale: GSD's "Wave Execution" ensures conflicting plans run sequentially.   
+        A merge conflict implies an anomaly bypassed the planning engine. Because @build operates   
+        with a lobotomized context funnel, it is mathematically unsafe for it to resolve complex conflicts.\*
 
 7\.  GATE 1 — LIGHTNING CHECK  
     └── Run fast linter / compiler (tsc \--noEmit, eslint)  
-    └── FAIL → increment retry\_count, git reset \--hard → back to step 5  
-    └── PASS → proceed to Gate 2
+    └── FAIL → increment retry\_count, git reset \--hard → back to step 5
 
 8\.  GATE 2 — HEAVY VALIDATION  
     └── @test validation script runs  
-    └── PASS → proceed to step 9  
-    └── FAIL → LLM Judge evaluates:  
-        ├── CODE\_ERROR → git reset \--hard, increment retry\_count → back to step 5  
-        └── FLAKE → re-run Gate 2, no reset, no retry increment
-
-    └── retry\_count \== max\_retries:  
-        ├── Preserve last error log in ticket file  
-        ├── Status → Blocked  
-        └── HALT
+    └── FAIL → LLM Judge evaluates (CODE\_ERROR resets; FLAKE re-runs).
 
 9\.  PASS — COMMIT & MERGE  
     └── Commit code with message: feat(\[ticket-id\]): \[objective\]  
     └── Merge branch → main  
-    └── \*\*Global State Updates:\*\* Tauri Orchestrator synchronously updates global \`STATE.md\` and regenerates global \`FILE\_MAP.md\` on the main branch. (Never updated by concurrent agents).  
-    └── Delete branch snapshot & lock file.  
-    └── Ticket status → In Review (if reviewer set) or Done.
+    └── Tauri Orchestrator synchronously updates global \`STATE.md\` & \`FILE\_MAP.md\`.  
+    └── Ticket status → In Review.
 
-### **Token Tracking During Loop**
+10\. PHASE REVIEW  
+    └── When all Feature tickets hit In Review → Fire /gsd:review (Section 5.8)
 
-After every agent call (steps 3, 4, 5, 8), the **Tauri Orchestrator (Host OS)** patches the ticket frontmatter:
+## **7\. Open Questions (v1.0 Targets)**
 
-yq e ".tokens\_used \+= $NEW\_TOKENS" \-i .planning/\[plan-id\].md
-
-*(Note: The Orchestrator performs this action because the Worker Docker container has Read-Only permissions to .planning/)*.
-
-## **Appendix A: Architectural Rationale & Impact Assessment**
-
-| Problem Statement | Solution / Proposal | Impact Assessment | Score |
-| :---- | :---- | :---- | :---- |
-| **Context rot** and quality degradation occur as the agent's context window fills with irrelevant data during long sessions. | Implement GSD's context engineering layer and the 'Ratchet' execution loop. Use atomic task plans (PLAN.md) to ensure each execution runs in a fresh 200k token context window, keeping main session context under 40%. | **High:** Maintains consistent code quality and system responsiveness throughout large projects; prevents the 'I'll be more concise now' failure mode. | **9/10** (Production Grade) |
-| The **project brain (STATE.md) accumulates** too much historical data over time, becoming a major token cost and noise source. | Implement Autoresearch-inspired **STATE.md Compression** triggered during /gsd:complete-milestone to archive resolved decisions and keep active state lean. | **High:** Reduces token spend and improves agent focus by ensuring only active blockers and open decisions are in the immediate context. | **9/10** (Genius/Efficient) |
-| Risk of agents writing **trivial or hallucinated tests** to falsely pass the verification loop ('escaping the Ratchet'). | Implement **'Adversarial QA'** where @test agents write validation scripts before @build starts, with @build being physically blocked from editing the test via Docker mount permissions. | **High:** Ensures validation integrity and prevents the AI from 'cheating' its way through requirements. | **9/10** (Least Risk) |
-| **Concurrent execution** can lead to FILE\_MAP.md staleness where one task merges changes that another parallel task is unaware of. | Utilize **branch-scoped snapshots** of the FILE\_MAP.md at the start of each ticket/action plan execution, only regenerating the global map on merge to main. | **Medium:** Solves race conditions in parallel AI engineering workflows, ensuring agents always work against a consistent view of the codebase. | **10/10** (Concurrency Correctness) |
-| **Manual approval** of every small action (git commits, bash commands) defeats the purpose of autonomous automation and freezes headless containers. | Adopt GSD's **\--skip-permissions** or 'yolo' mode to allow the agent to perform surgical, traceable, and meaningful atomic commits automatically without terminal blocking. | **Medium:** Significantly increases development speed and enables hands-off execution while maintaining a clean, bisect-ready git history. | **8/10** (Practical) |
-| A **chat-based interface is insufficient** for managing a complex autonomous engineering organization or 'Epic' planning. | Build the **OCP Control Tower** (Tauri-based UI) to render GSD's .planning/ directory as a Kanban board, decoupling the user interface from the heavy AI execution engine. | **Medium:** Provides professional project management oversight (Jira-style) for autonomous agents, making the tool production-ready. | **7/10** (User Experience) |
-
+* \[x\] \~\~Define merge conflict resolution protocol for @build\~\~ *(Resolved: Strict human escalation)*  
+* \[x\] \~\~Define @review agent for the "In Review" status\~\~ *(Resolved: Mapped to /gsd:review Phase Verification)*  
+* \[ \] Specify FILE\_MAP.md generation algorithm (static analysis vs. LLM-assisted vs. tree-sitter)  
+* \[ \] Define token\_budget defaults per ticket type (feature vs. bugfix vs. refactor)  
+* \[ \] Multi-workspace support: running parallel Epics in separate git worktrees
